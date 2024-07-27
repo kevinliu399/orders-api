@@ -4,29 +4,64 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type App struct {
 	router http.Handler
+	rdb    *redis.Client
 }
 
 func New() *App {
 	app := &App{
-		router: loadRoutes(),
+		rdb: redis.NewClient(&redis.Options{}),
 	}
+
+	app.loadRoutes()
+
 	return app
 }
 
 // A receiver is the owner of the function
-func (a *App) Start(cts context.Context) error {
+func (a *App) Start(ctx context.Context) error {
 	server := &http.Server{
 		Addr:    ":3000",
 		Handler: a.router,
 	}
 
-	err := server.ListenAndServe()
+	err := a.rdb.Ping(ctx).Err()
 	if err != nil {
-		return fmt.Errorf("server failed to start: %w", err)
+		return fmt.Errorf("redis failed to ping: %w", err)
+	}
+
+	defer func() {
+		if err := a.rdb.Close(); err != nil {
+			fmt.Println("redis failed to close")
+		}
+	}()
+
+	fmt.Println("Server is running on port 3000")
+
+	ch := make(chan error, 1) // buffered channel
+
+	go func() {
+		err = server.ListenAndServe()
+		if err != nil {
+			ch <- fmt.Errorf("server failed to start: %w", err)
+		}
+		close(ch)
+	}()
+
+	select {
+	case err = <-ch:
+		return err
+	case <-ctx.Done():
+		timeout, cancel := context.WithTimeout(context.Background(), 5*time.Second) // we do this to give the server time to shutdown
+		defer cancel()
+
+		return server.Shutdown(timeout)
 	}
 
 	return nil
